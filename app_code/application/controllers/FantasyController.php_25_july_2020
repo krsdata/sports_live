@@ -1,0 +1,584 @@
+<?php
+defined('BASEPATH') OR exit('No direct script access allowed');
+
+class FantasyController extends CI_Controller 
+{
+    public function __construct()
+    {
+        parent::__construct();
+
+        $this->token = 'token='.FANTASY_API_TOKEN;
+        $this->per_page = 10;
+    }
+
+    public function index()
+    {
+        echo "Welcome"; die;
+    }
+
+    public function getUpcomingMatch($page = 1)
+    {
+        $date = '&date='.date('Y-m-d').'_'.date('Y-m-d', strtotime('+10 days'));
+        $paging = '&per_page='.$this->per_page.'&paged='.$page.'&';
+
+        $url = FANTASY_API_ENDPOINT.'matches/?status=1&pre_squad=true'.$date.$paging.$this->token;
+        $result = $this->callAPI($url);
+
+        //echo "<pre>"; print_r($result); die;
+        $this->processMatch(1, $page, $result);
+    }
+
+    public function getCompletedMatch($page = 1)
+    {
+        $date = '&date='.date('Y-m-d').'_'.date('Y-m-d', strtotime('-3 days'));
+        $paging = '&per_page='.$this->per_page.'&paged='.$page.'&';
+
+        $url = FANTASY_API_ENDPOINT.'matches/?status=2&pre_squad=true'.$date.$paging.$this->token;
+        $result = $this->callAPI($url);
+        //echo "<pre>"; print_r($result);
+
+        $this->processMatch(2, $page, $result);
+    }
+
+    /*public function getLiveMatch($page = 1)
+    {
+        $paging = '&per_page='.$this->per_page.'&paged='.$page.'&';
+        
+        $url = FANTASY_API_ENDPOINT.'matches/?status=3&pre_squad=true'.$paging.$this->token;
+        $result = $this->callAPI($url);
+        //echo "<pre>"; print_r($result);die;
+
+        $this->processMatch(3, $page, $result);
+    }*/
+
+    public function getLiveMatch()
+    {
+        $dt = date("Y-m-d H:i:s");
+        $this->CommonModel->updateData('API_matches', array('mat_status' => 3), array('mat_startdate <= ' => $dt, 'mat_status' => 1));
+ 	 	
+    }
+
+    public function getPlayers($comp_id=42211, $match_id=113600)
+    {
+        $url = FANTASY_API_ENDPOINT.'competitions/'.$comp_id.'/squads/'.$match_id.'?pre_squad=true&'.$this->token;
+        $result = $this->callAPI($url);
+        //echo "<pre>"; print_r($result); die;
+
+        $this->processSquadPlayer($result, $match_id);
+
+        return TRUE;
+    }
+
+    public function getPlaying11Squad()
+    {
+        //$mat_ids = $this->CommonModel->selectRecords(array('mat_status' => 1), 'API_matches', 'mat_id');
+        $mat_ids = $this->CommonModel->selectRecords(array('mat_status != ' => 2, 'mat_status != ' => 4), 'API_matches', 'mat_id');
+        //echo "<pre>"; print_r($mat_ids); die();
+        //$mat_ids = array('mat_id' => 41749);
+        foreach ($mat_ids as $mat_id) 
+        {
+            $match_id = $mat_id['mat_id'];
+
+            $url = FANTASY_API_ENDPOINT.'matches/'.$match_id.'/squads?'.$this->token;
+            $result = $this->callAPI($url);
+            //echo "<pre>"; print_r($result); die;
+            $this->processSquadPlaying11Player($result, $match_id);
+        }
+    }
+
+    private function processSquadPlaying11Player($result, $match_id)
+    {
+        //echo "<pre>"; print_r($result); die;
+        if(isset($result['status']) && $result['status'] == "ok")
+        {
+            $team1_id = $result['response']['teama']['team_id'];
+            $team2_id = $result['response']['teamb']['team_id'];
+            
+            $team1_players = $result['response']['teama']['squads'];
+            $team2_players = $result['response']['teamb']['squads'];
+
+            $team1_ply_ids = array();
+            $team2_ply_ids = array();
+
+            foreach ($team1_players as $key => $ply) 
+            {
+                if ($ply['playing11'] == "true")
+                    $team1_ply_ids[] = $ply['player_id'];
+            }
+
+            foreach ($team2_players as $key => $ply) 
+            {
+                if ($ply['playing11'] == "true")
+                    $team2_ply_ids[] = $ply['player_id'];
+            }
+            
+            $team1_ply_ids = implode(',', $team1_ply_ids);
+            $team2_ply_ids = implode(',', $team2_ply_ids);
+
+            //update match squad for team1
+            $where = array('sqd_team_id' => $team1_id, 'sqd_mat_id' => $match_id);
+            $this->CommonModel->updateData('API_match_squad', array('sqd_ply11_ids' => $team1_ply_ids), $where);
+
+            //update match squad for team2
+            $where = array('sqd_team_id' => $team2_id, 'sqd_mat_id' => $match_id);
+            $this->CommonModel->updateData('API_match_squad', array('sqd_ply11_ids' => $team2_ply_ids), $where);
+        }
+
+        return TRUE;
+    }
+
+    private function processSquadPlayer($result, $match_id)
+    {
+        //echo "<pre>"; print_r($result->response);
+
+        if(isset($result['status']) && $result['status'] == "ok" && isset($result['response']['squads'][0]['players']) && isset($result['response']['squads'][1]['players']))
+        {
+            $team1_players = $result['response']['squads'][0]['players'];
+            $team2_players = $result['response']['squads'][1]['players'];
+            $team = array_merge($team1_players, $team2_players);
+            $ply_data = array();
+            $team1_id = $result['response']['squads'][0]['team_id'];
+            $team2_id = $result['response']['squads'][1]['team_id'];
+            $team1_ply_ids = implode(',', array_column($team1_players, 'pid'));
+            $team2_ply_ids = implode(',', array_column($team2_players, 'pid'));
+
+            foreach ($team as $key => $value) 
+            {
+                if (!isset($value['pid'])) 
+                    continue;
+
+                //match data
+                $ply_data[$key][] = $value['pid'];
+                $ply_data[$key][] = $value['first_name'];
+                $ply_data[$key][] = $value['middle_name'];
+                $ply_data[$key][] = $value['last_name'];
+                $ply_data[$key][] = $value['title'];
+                $ply_data[$key][] = $value['short_name'];
+                $ply_data[$key][] = $value['birthdate'];
+                $ply_data[$key][] = $value['country'];
+                $ply_data[$key][] = $value['logo_url'];
+                $ply_data[$key][] = $value['playing_role'];
+                $ply_data[$key][] = $value['batting_style'];
+                $ply_data[$key][] = $value['bowling_style'];
+                $ply_data[$key][] = $value['recent_match'];
+                $ply_data[$key][] = $value['fantasy_player_rating'];
+                $ply_data[$key][] = $value['nationality'];
+            }
+
+            //insert or update match
+            $this->FantasyModel->savePlayer($ply_data);
+
+            //insert squad data
+            $team1_data = array();
+            $team1_data['sqd_team_id'] = $team1_id;
+            $team1_data['sqd_mat_id'] = $match_id;
+            $team1_data['sqd_ply_ids'] = $team1_ply_ids;
+            $this->FantasyModel->saveSquad($team1_data);
+
+            $team2_data = array();
+            $team2_data['sqd_team_id'] = $team2_id;
+            $team2_data['sqd_mat_id'] = $match_id;
+            $team2_data['sqd_ply_ids'] = $team2_ply_ids;
+            $this->FantasyModel->saveSquad($team2_data);
+        }
+
+        return TRUE;
+    }
+
+    protected function processMatch($match_status, $current_page, $result)
+    {
+        //echo "<pre>"; print_r($result); die;
+        if(isset($result['status']) && $result['status'] == "ok")
+        {
+            $mat_data = array();
+            $comp_data = array();
+            $team_data = array();
+            $total_pages = $result['response']['total_pages'];
+            $i = -1;
+
+            foreach ($result['response']['items'] as $key => $value) 
+            {
+                $match_id = $value['match_id'];
+                $comp_id = $value['competition']['cid'];
+                $match_format = $value['format'];
+
+                if ($match_format == 2 || $match_format == 5)
+                    continue;
+
+                //get match sqaud(players)
+                $this->getPlayers($comp_id, $match_id);
+
+                //match data
+                $mat_data[$key][] = $match_id;
+                $mat_data[$key][] = $value['title'];
+                $mat_data[$key][] = $value['short_title'];
+                $mat_data[$key][] = $value['subtitle'];
+                $mat_data[$key][] = $value['format'];
+                $mat_data[$key][] = $value['status'];
+                $mat_data[$key][] = $value['competition']['cid'];
+                $mat_data[$key][] = $value['teama']['team_id'];
+                $mat_data[$key][] = $value['teamb']['team_id'];
+                //$newtimestamp = strtotime($value['date_start'].' - 30 minute');
+                $newtimestamp = strtotime($value['date_start']);
+                $nn_ddate = date('Y-m-d H:i:s', $newtimestamp);
+                //$newtimestamp1 = strtotime($value['date_end'].' - 30 minute');
+                $newtimestamp1 = strtotime($value['date_end']);
+                $nn_ddate1 = date('Y-m-d H:i:s', $newtimestamp1);
+                $mat_data[$key][] = $nn_ddate;
+                $mat_data[$key][] = $nn_ddate1;
+
+                //competition data
+                $comp_data[$key][] = $comp_id;
+                $comp_data[$key][] = $value['competition']['title'];
+                $comp_data[$key][] = $value['competition']['type'];
+                $comp_data[$key][] = $value['competition']['category'];
+                $comp_data[$key][] = $value['competition']['match_format'];
+                $comp_data[$key][] = $value['competition']['status'];
+                $comp_data[$key][] = $value['competition']['datestart'];
+                $comp_data[$key][] = $value['competition']['dateend'];
+                $comp_data[$key][] = $value['competition']['total_matches'];
+                $comp_data[$key][] = $value['competition']['total_teams'];
+
+                //team1 data
+                $i++;
+                $team_data[$i][] = $value['teama']['team_id'];
+                $team_data[$i][] = $value['teama']['name'];
+                $team_data[$i][] = $value['teama']['short_name'];
+                $team_data[$i][] = $value['teama']['logo_url'];
+
+                //team2 data
+                $i++;
+                $team_data[$i][] = $value['teamb']['team_id'];
+                $team_data[$i][] = $value['teamb']['name'];
+                $team_data[$i][] = $value['teamb']['short_name'];
+                $team_data[$i][] = $value['teamb']['logo_url']; 
+
+                //insert match status history
+                $mat_his_data = array();
+                $mat_his_data['msts_mat_id'] = $match_id;
+                $mat_his_data['msts_status'] = $value['status'];
+                $this->CommonModel->insertData('API_matchStatus_history', $mat_his_data);
+            }
+
+            //remove duplicate ids
+            $mat_data = array_map("unserialize", array_unique(array_map("serialize", $mat_data)));
+            $comp_data = array_map("unserialize", array_unique(array_map("serialize", $comp_data)));
+            $team_data = array_map("unserialize", array_unique(array_map("serialize", $team_data)));
+
+            //insert or update match
+            if (count($mat_data) > 0)
+                $this->FantasyModel->saveMatch($mat_data);
+
+            //insert or update competition
+            if (count($comp_data) > 0)
+                $this->FantasyModel->saveCompetition($comp_data);
+
+            //insert or update team
+            if (count($team_data) > 0)
+                $this->FantasyModel->saveTeam($team_data);
+
+            //call function again
+            if ($total_pages > $current_page)
+            {
+                switch ($match_status) 
+                {
+                    case 1:
+                    {   
+                        $this->getUpcomingMatch(++$current_page);
+                        break;
+                    }
+
+                    case 2:
+                    {   
+                        $this->getCompletedMatch(++$current_page);
+                        break;
+                    }
+
+                    /*case 3:
+                    {   
+                        $this->getLiveMatch(++$current_page);
+                        break;
+                    }*/
+
+                    default: break;
+                }
+            }
+        }
+
+        return TRUE;
+    }
+
+    //copy contest from contests1 table to contests table for new matches
+    public function copyContestAndPrize()
+    {
+        $this->FantasyModel->copyContestAndPrize();
+    }
+
+    public function updateUserRankAndPrice()
+    {
+        $this->FantasyModel->updateUserRankAndPrice(43675);
+    }
+
+    //get live score and update other information according to stats
+    public function getLiveScore()
+    {    
+        //get all live matches from table
+        $liveMatchIds = $this->CommonModel->selectRecords(array('mat_status' => 3), 'API_matches', 'mat_id');
+        //echo "<pre>"; print_r($liveMatchIds); die;
+        
+        //$liveMatchIds = array('mat_id' => 41896);
+        foreach ($liveMatchIds as $liveMatchId) 
+        {
+            //get score of live match
+            $matchId = $liveMatchId['mat_id'];
+            //$url = FANTASY_API_ENDPOINT.'matches/'.$matchId.'/live?'.$this->token;
+            $url = FANTASY_API_ENDPOINT.'matches/'.$matchId.'/scorecard?'.$this->token;
+            $scoreData = $this->callAPI($url);
+            // echo "<pre>"; print_r($scoreData); die;
+            
+            if ($scoreData['status'] == "ok") 
+            {
+                //update score and status of match
+                $score_data = array();
+                $score_data['mat_score'] = serialize($scoreData);
+                //$score_data['mat_status'] = $scoreData['response']['status'];
+                $this->CommonModel->updateData('API_matches', $score_data, array('mat_id' => $matchId));
+
+                //insert match status history
+                // $mat_his_data = array();
+                // $mat_his_data['msts_mat_id'] = $matchId;
+                // $mat_his_data['msts_status'] = $scoreData['response']['status'];
+                // $this->CommonModel->insertData('API_matchStatus_history', $mat_his_data);
+
+                //get live players point
+                $this->getAndProcessPlayerPoints($matchId);
+
+                //get all teams of one match
+                $teamsPlayers = $this->CommonModel->selectRecords(array('match_id' => $matchId), 'user_team', 'user_team_id, players, caption, vice_caption');
+                //echo "<pre>"; print_r($teamsPlayers); die;
+                
+                //get points of one team
+                foreach ($teamsPlayers as $teamPlayer) 
+                {
+                    $userTeamId = $teamPlayer['user_team_id'];
+                    $captainId = $teamPlayer['caption'];
+                    $viceCaptainId = $teamPlayer['vice_caption'];
+                    $playersWithTeam = json_decode(unserialize($teamPlayer['players']));
+
+                    $i = 0;
+                    $matchPlayers = array();
+                    foreach ($playersWithTeam as $players) 
+                        array_push($matchPlayers, $players);
+                    
+                    if (!isset($matchPlayers[0]))
+                        $matchPlayers[0] = array();
+
+                    if (!isset($matchPlayers[1]))
+                        $matchPlayers[1] = array();
+                    
+                    //make array of players id
+                    $matchPlayersIds = array_merge($matchPlayers[0], $matchPlayers[1]);
+
+                    //get point of one player
+                    $playersPoint = $this->CommonModel->selectRecords(array('pnt_mat_id' => $matchId), 'API_player_point', 'pnt_ply_id, pnt_total', array(), array('pnt_ply_id', $matchPlayersIds));
+                    //echo "<pre>"; print_r($playersPoint); die;
+                    
+                    $totalPointOfUserTeam = 0;
+                    //echo "<pre>"; print_r($playersPoint);
+                    
+                    foreach ($playersPoint as $playerPoint) 
+                    {
+                        //calculate different points according to player role
+                        $points = ($playerPoint['pnt_ply_id'] == $captainId) ? $playerPoint['pnt_total']*2 : (($playerPoint['pnt_ply_id'] == $viceCaptainId) ? $playerPoint['pnt_total']*1.5 : $playerPoint['pnt_total']);
+                        
+                        //echo "<pre>"; print_r($points); die;
+                        $totalPointOfUserTeam = $totalPointOfUserTeam+$points;
+
+                        $this->CommonModel->updateData('user_team', array('usr_team_earn_points' => round($totalPointOfUserTeam, 2)), array('user_team_id' => $userTeamId));
+                    }
+                }
+
+                $mat_status = ($scoreData['response']['status'] == 4) ? 4 : 2;
+
+                //store user rank with points
+                if ($mat_status != 4) 
+                    $this->FantasyModel->updateUserRankAndPrice($matchId);
+                
+                //echo "<pre>"; print_r($scoreData); die;
+                //update match status from live to complete
+                if ($scoreData['response']['verified'] == "true") 
+                {
+                    //update match status from live to complete/cancel
+                    $this->CommonModel->updateData('API_matches', array('mat_status' => $mat_status), array('mat_id' => $matchId));
+
+                    //update winning amount if match finished
+                    if ($mat_status == 2) 
+                        $this->FantasyModel->updateUserRankAndPrice($matchId, $mat_status);
+
+                    //insert match status history
+                    // $mat_his_data = array();
+                    // $mat_his_data['msts_mat_id'] = $matchId;
+                    // $mat_his_data['msts_status'] = $scoreData['response']['status'];
+                    // $this->CommonModel->insertData('API_matchStatus_history', $mat_his_data);
+                }
+
+                /*if ($scoreData['response']['status'] == 2) 
+                {
+                    //update match status from live to complete
+                    $this->CommonModel->updateData('API_matches', array('mat_status' => 2), array('mat_id' => $matchId));
+
+                    //insert match status history
+                    $mat_his_data = array();
+                    $mat_his_data['msts_mat_id'] = $matchId;
+                    $mat_his_data['msts_status'] = $scoreData['response']['status'];
+                    $this->CommonModel->insertData('API_matchStatus_history', $mat_his_data);
+                }*/
+
+                //update match status from live to complete
+                /*if ($scoreData['response']['status'] == 2) 
+                    $this->CommonModel->updateData('API_matches', array('mat_status' => 2), array('mat_id' => $matchId));*/
+            }
+        }
+    }
+
+    public function decideWinner()
+    {
+        $this->FantasyModel->decideWinner();
+    }
+
+    public function earnMoney()
+    {
+        $this->FantasyModel->earnMoney();
+    }
+    
+    public function updatePointsOfAllPlayers()
+    {
+        $liveMatchIds = $this->CommonModel->selectRecords('', 'API_matches', 'mat_id');
+
+        foreach ($liveMatchIds as $value) 
+            $this->getAndProcessPlayerPoints($value['mat_id']);
+    }
+
+    private function getAndProcessPlayerPoints($matchId = "42194")
+    {
+        $url = FANTASY_API_ENDPOINT.'matches/'.$matchId.'/point?'.$this->token;
+        $pointData = $this->callAPI($url);
+        //echo "<pre>"; print_r($pointData); die;
+
+        if ($pointData && $pointData['status'] == "ok") 
+        {
+            $where = array();
+            $where['sqd_mat_id'] = $matchId;
+            
+            //get team id and player points from teama
+            $where['sqd_team_id'] = $pointData['response']['teama']['team_id'];
+            $team1_points = $pointData['response']['points']['teama'];
+            $this->CommonModel->updateData('API_match_squad', array('sqd_points' => serialize(json_encode($team1_points))), $where);
+
+            //get team id and player points from teamb
+            $where['sqd_team_id'] = $pointData['response']['teamb']['team_id'];
+            $team2_points = $pointData['response']['points']['teamb'];
+            $this->CommonModel->updateData('API_match_squad', array('sqd_points' => serialize(json_encode($team2_points))), $where);
+
+            //process player point records in API_player_point table
+            $teama_playing11 = isset($pointData['response']['points']['teama']['playing11']) ? $pointData['response']['points']['teama']['playing11'] : array();
+            $teama_substitute = isset($pointData['response']['points']['teama']['substitute']) ? $pointData['response']['points']['teama']['substitute'] : array();
+            $teamb_playing11 = isset($pointData['response']['points']['teamb']['playing11']) ? $pointData['response']['points']['teamb']['playing11'] : array();
+            $teamb_substitute = isset($pointData['response']['points']['teamb']['substitute']) ? $pointData['response']['points']['teamb']['substitute'] : array();
+            $matchPlayers = array_merge($teama_playing11, $teama_substitute, $teamb_playing11, $teamb_substitute);
+            //echo "<pre>"; print_r($matchPlayers); die;
+
+            $ply_point_data = array();
+            foreach ($matchPlayers as $key => $value) 
+            {
+                if (!isset($value['pid'])) 
+                    continue;
+
+                //match data
+                $ply_point_data[$key][] = $matchId;
+                $ply_point_data[$key][] = $value['pid'];
+                $ply_point_data[$key][] = $value['point'];
+                $ply_point_data[$key][] = $value['rating'];
+                $ply_point_data[$key][] = $value['starting11'];
+                $ply_point_data[$key][] = $value['run'];
+                $ply_point_data[$key][] = $value['four'];
+                $ply_point_data[$key][] = $value['six'];
+                $ply_point_data[$key][] = $value['sr'];
+                $ply_point_data[$key][] = $value['fifty'];
+                $ply_point_data[$key][] = $value['duck'];
+                $ply_point_data[$key][] = $value['wkts'];
+                $ply_point_data[$key][] = $value['maidenover'];
+                $ply_point_data[$key][] = $value['er'];
+                $ply_point_data[$key][] = $value['catch'];
+                $ply_point_data[$key][] = $value['runoutstumping'];
+                $ply_point_data[$key][] = $value['runoutthrower'];
+                $ply_point_data[$key][] = $value['runoutcatcher'];
+                $ply_point_data[$key][] = $value['directrunout'];
+                $ply_point_data[$key][] = $value['stumping'];
+                $ply_point_data[$key][] = $value['thirty'];
+            }
+
+            //echo "<pre>"; print_r($ply_point_data); die;
+            //insert or update player points
+            $this->FantasyModel->savePlayerPoints($ply_point_data);
+            //echo "<pre>"; print_r($matchPlayers); die;
+        }
+        
+        return TRUE;
+    }
+
+    protected function callAPI($url)
+    {
+        $ch = curl_init($url);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        $result = curl_exec($ch);
+        curl_close($ch); 
+
+        return json_decode($result, true);
+    }
+    
+    public function contestAutoCancel()
+    {
+        $this->FantasyModel->contestAutoCancel();
+    }
+
+    public function cancelMatch($matchId)
+    {
+        $this->FantasyModel->cancelMatch($matchId);
+    }
+
+    public function distributePromoterBonus($matchId)
+    {
+        $this->FantasyModel->distributePromoterBonus($matchId);
+    }
+
+    public function updateMatchSquadWithPlaying11($match_id)
+    {
+        //get match squad
+        $squad = $this->CommonModel->selectRecords(array('sqd_mat_id' => $match_id), 'API_match_squad', 'sqd_ply_ids, sqd_ply11_ids');
+
+        //get compition id
+        $comp_id = $this->CommonModel->selectRecords(array('mat_id' => $match_id), 'API_matches', 'mat_comp_id');
+
+        $team1 = explode(',', $squad[0]['sqd_ply_ids']);
+        $team1_ply_11 = explode(',', $squad[0]['sqd_ply11_ids']);
+        $result1 = array_diff($team1_ply_11, $team1);
+
+        if (count($result1)>0) 
+        {
+            $this->getPlayers($comp_id[0]['mat_comp_id'], $match_id);
+            $this->updateMatchSquadWithPlaying11($match_id);
+        }
+
+        $team2 = explode(',', $squad[1]['sqd_ply_ids']);
+        $team2_ply_11 = explode(',', $squad[1]['sqd_ply11_ids']);
+        $result2 = array_diff($team2_ply_11, $team2);
+
+        if (count($result2)>0) 
+        {
+            $this->getPlayers($comp_id[0]['mat_comp_id'], $match_id);
+            $this->updateMatchSquadWithPlaying11($match_id);
+        }
+    }
+}
+?>

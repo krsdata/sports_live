@@ -1,0 +1,1131 @@
+<?php 
+if ( ! defined('BASEPATH')) exit('No direct script access allowed');
+
+class Model extends CI_Model
+{
+    function __construct() 
+    {
+        parent::__construct();
+
+        $this->load->model('CommonModel');
+    }
+
+    //update column datatype
+    public function updateColumnDataType()
+    {
+        //$this->db->query('ALTER TABLE `user` CHANGE `emailotp` `emailotp` VARCHAR(10) NOT NULL');
+
+        $this->db->query('ALTER TABLE `user` CHANGE `emailotp` `emailotp` VARCHAR(255) CHARACTER SET latin1 COLLATE latin1_swedish_ci NOT NULL;');
+    }
+
+    public function getMatch($request) 
+    {
+        $sql[] = 'SELECT 
+                    mat_id AS matchId, 
+                    CONCAT(UNIX_TIMESTAMP(mat_startdate), "000") AS startDate, 
+                    CONCAT(UNIX_TIMESTAMP(mat_enddate), "000") AS endDate, 
+                    t1.team_id AS team1Id, t2.team_id AS team2Id, t1.team_short_name AS team1ShortName, t2.team_short_name AS team2ShortName, t1.team_logo_url AS team1Image, t2.team_logo_url AS team2Image, comp_title AS competitionTitle, m1.mat_status AS matchStatus,
+                    COUNT(DISTINCT sqd_mat_id) AS isLineup
+                FROM API_matches AS m1
+                INNER JOIN API_team AS t1 
+                    ON m1.mat_team1_id = t1.team_id 
+                INNER JOIN API_team AS t2 
+                    ON m1.mat_team2_id = t2.team_id 
+                LEFT JOIN API_competition AS c1
+                    ON c1.comp_id = m1.mat_comp_id
+                LEFT JOIN API_match_squad AS c2
+                    ON c2.sqd_mat_id = m1.mat_id AND sqd_ply11_ids != ""
+                WHERE m1.mat_isVisible = 1';
+
+        if (!empty($request['matchId']))
+            $sql[] = "m1.mat_id = ".$request['matchId'];
+
+        if ($request['matchType']) 
+            $sql[] = "m1.mat_status IN (".$request['matchType'].")";
+
+
+        $sql = implode(' AND ', $sql)." GROUP BY m1.mat_id ORDER BY m1.mat_startdate ASC";
+        $query = $this->db->query($sql);
+
+        if ($query->num_rows() > 0)  
+            return $query->result_array();
+        else
+            return FALSE;
+    }
+
+    public function getMatchSquad($matchId)
+    {
+        $sql = 'SELECT 
+                    mat_sqd_id, sqd_team_id, sqd_ply_ids, sqd_ply11_ids
+                FROM API_matches
+                INNER JOIN API_match_squad 
+                    ON sqd_mat_id = mat_id
+                WHERE mat_status = 1 AND mat_id = '.$matchId;
+
+        $query = $this->db->query($sql); 
+        $result = $query->result_array();
+
+        return $result; 
+    }
+
+    public function getTeam($request)
+    {
+        if ($request['userId']) 
+        {
+            $userId = $request['userId'];
+            $where = 'INTERVAL 2 MINUTE < NOW()';
+        }
+        else
+        {
+            $userId = $request['loggedInUserId'];
+            $where = 0;
+        }
+
+        $sql = 'SELECT 
+                    user_team_id, players, caption, vice_caption, match_id, usr_team_earn_points, user_team_number AS teamNumber
+                FROM user_team 
+                INNER JOIN API_matches 
+                    ON mat_id = match_id
+                WHERE (mat_startdate + '.$where.') AND user_id = '.$userId.' AND match_id = '.$request['matchId'];
+
+        if ($request['userTeamId']) 
+            $sql .= ' AND user_team_id = '.$request['userTeamId'];
+
+        $query = $this->db->query($sql); 
+        $result = $query->result_array();
+
+        return $result; 
+    }
+
+    public function getMatchContestTypes($request)
+    {
+        $matchId = isset($request['matchId']) ? $request['matchId'] : "";
+        $contestType = (isset($request['contestType']) && !empty($request['contestType'])) ? ' AND type = '.$request['contestType'] : "";
+
+        $sql = 'SELECT type AS contestType, name AS contestName, slogan AS contestTitle, CONCAT("'.base_url().CONTEST_TYPE_IMAGE_PATH.'", image) AS contestImage
+                FROM contestname
+                WHERE type IN (SELECT type FROM contests WHERE matchid = '.$matchId.$contestType.')
+                ORDER BY type ASC';
+
+        //echo $sql; die;
+        $query = $this->db->query($sql); 
+        $result = $query->result_array();
+
+        return $result;
+    }
+
+    public function getMatchContest($request)
+    {
+        $matchId = $request['matchId'];
+        $userId = $request['userId'];
+        $where = "";
+        $contestType = isset($request['contestType']) ? $request['contestType'] : "";
+        $limit = isset($request['limit']) ? $request['limit'] : "";        
+
+        if (isset($request['contestId'])) 
+            $where = ' AND contests.contests_id = '.$request['contestId'];
+        else
+            $where = ' AND isFull = 0 ';
+
+        $sql = 'SELECT 
+                    contests.contests_id AS contestId, contests.amount AS prizeMoney, fee AS entryFee, no_of_teams AS totalTeamCount, MAX(max1) AS totalWinnerCount, multi AS multipleJoinAllowed, fill1 AS autoCancelAllowed, contests.type AS contestType, contests.matchid AS matchId, "" AS userRank
+                FROM contests
+                LEFT JOIN matches_joined AS m1 ON m1.contests_id = contests.contests_id AND m1.match_id = '.$matchId.
+                ' INNER JOIN prize ON contestid = contests.contests_id 
+                WHERE repeat1 > 0 AND contests.matchid = '.$matchId.' AND contests.type = '.$contestType.$where.
+                ' GROUP BY contests.contests_id
+                 ORDER BY fee ';
+
+        $query = $this->db->query($sql.$limit); 
+        $result = $query->result_array();
+
+        foreach ($result as $key => $value) 
+        {
+            //get left team count(no_of_teams-joined_teams)
+            $leftTeamCount = $this->CommonModel->selectRecord(array('contests_id' => $value['contestId']), 'matches_joined', 'COUNT(joined_id) AS leftTeamCount');
+
+            //get logged in user count of contest
+            $userJoinedCount = $this->CommonModel->selectRecord(array('contests_id' => $value['contestId'], 'user_id' => $userId), 'matches_joined', 'COUNT(joined_id) AS userJoinedCount');
+
+            $result[$key]['leftTeamCount'] = (string) ($value['totalTeamCount'] - $leftTeamCount['leftTeamCount']);
+
+            $result[$key]['loggedInUserJoinedCount'] = $userJoinedCount['userJoinedCount'];
+        }
+
+        //get contests count
+        $cntQuery = $this->db->query($sql); 
+        $cntResult = $cntQuery->result_array();
+
+        $data['contests'] = $result;
+        $data['totalCount'] = sizeof($cntResult);
+
+        return $data;
+    }
+
+    public function getMatchStatus($matchId)
+    {
+        $sql = 'SELECT mat_status FROM API_matches WHERE mat_id = '.$matchId;  
+        $query = $this->db->query($sql); 
+        $result = $query->row_array();
+
+        return $result;
+    }
+
+    public function getUserJoinedContestsOfMatch($request)
+    {
+        // $query = $this->db->query('select * from matches_joined'); 
+        // $result = $query->result_array();
+        // print_r($result); die;
+
+        $userId = $request['userId'];
+        $matchId = $request['matchId'];
+        //$matchTypes = $request['matchType'];
+        $matchTypes = $this->getMatchStatus($matchId);
+        
+        $sql = 'SELECT 
+                    contests.contests_id AS contestId, contests.matchid AS matchId, no_of_teams AS totalTeamCount, name AS contestName, contests.amount AS prizeMoney, fee AS entryFee, contests.type AS contestType
+                FROM contests
+                INNER JOIN matches_joined AS m1 
+                    ON m1.contests_id = contests.contests_id AND m1.match_id = '.$matchId.' AND user_id = '.$userId. 
+                ' INNER JOIN user_team 
+                    ON user_team_id = team_id 
+                INNER JOIN contestname ON contestname.type = contests.type 
+                WHERE contests.matchid = '.$matchId.' 
+                GROUP BY contests.contests_id';
+
+        $query = $this->db->query($sql); 
+        $result = $query->result_array();
+
+        foreach ($result as $key => $value) 
+        {
+            $contestId = $value['contestId'];
+
+            //get total winners
+            $totalWinnerCount = $this->CommonModel->selectRecord(array('contestid' => $contestId), 'prize', 'MAX(max1) AS totalWinnerCount');
+            $result[$key]['totalWinnerCount'] = $totalWinnerCount['totalWinnerCount'];
+
+            //get left team count(no_of_teams-joined_teams)
+            $totalUserJoinedCount = $this->CommonModel->selectRecord(
+                array(
+                    'contests_id' => $contestId, 
+                    'match_id' =>  $matchId
+                ), 
+                'matches_joined', 
+                'COUNT(joined_id) AS totalUserJoinedCount'
+            );
+            $result[$key]['totalUserJoinedCount'] = $totalUserJoinedCount['totalUserJoinedCount'];
+
+            //required in upcoming match
+            if (1 == $matchTypes['mat_status'])
+            {
+                //get left team count(no_of_teams-joined_teams)
+                $leftTeamCount = $this->CommonModel->selectRecord(array('contests_id' => $contestId), 'matches_joined', 'COUNT(joined_id) AS leftTeamCount');
+                $result[$key]['leftTeamCount'] = (string) ($value['totalTeamCount'] - $leftTeamCount['leftTeamCount']);
+            }
+
+            if (3 == $matchTypes['mat_status'] || 2 == $matchTypes['mat_status'] || 4 == $matchTypes['mat_status'])
+            {
+                //get logged in user count of contest
+                $userJoinedCount = $this->CommonModel->selectRecord(array('contests_id' => $contestId, 'user_id' => $userId), 'matches_joined', 'COUNT(joined_id) AS userJoinedCount');
+                $result[$key]['loggedInUserJoinedCount'] = $userJoinedCount['userJoinedCount'];
+            }
+
+            if (2 == $matchTypes['mat_status'] || 3 == $matchTypes['mat_status'])
+            {
+                //get user rank for contest
+                //get logged in user count of contest
+                $rankSql = 'SELECT rank, user_team_number 
+                                FROM matches_joined
+                                INNER JOIN user_team 
+                                    ON user_team_id = team_id AND user_team.match_id = '.$matchId.' AND user_team.user_id = '.$userId.'
+                                WHERE matches_joined.match_id = '.$matchId.' AND matches_joined.user_id = '.$userId.' AND contests_id = '.$contestId.'
+                                ORDER BY rank ASC
+                                LIMIT 0, 1';
+                $query = $this->db->query($rankSql); 
+                $rankResult = $query->row_array();
+
+                $result[$key]['userRank'] = $rankResult['rank'];
+                $result[$key]['teamNumber'] = $rankResult['user_team_number'];
+
+                /*$ldr_brd_data = array();
+                $ldr_brd_data['matchId'] = $matchId;
+                $ldr_brd_data['contestId'] = $contestId;
+                
+                $rankData = $this->getLeaderboard($ldr_brd_data);
+                foreach ($rankData as $rank)
+                {
+                    if ($rank['userId'] == $userId) 
+                    {
+                        $result[$key]['userRank'] = $rank['rank'];
+                        $result[$key]['teamNumber'] = $rank['teamNumber'];
+                        break;
+                    }
+                }*/
+            }   
+        }
+
+        return $result;
+    }
+
+    public function getUserJoinedContestCount($request)
+    {
+        $userId = $request['userId'];
+        $matchId = $request['matchId'];
+        $matchType = $request['matchType'];
+        
+        $sql = 'SELECT 
+                    contests.contests_id AS contestId, no_of_teams AS totalTeamCount
+                FROM contests
+                INNER JOIN matches_joined AS m1 
+                    ON m1.contests_id = contests.contests_id AND m1.match_id = '.$matchId.' AND user_id = '.$userId. 
+                ' WHERE contests.matchid = '.$matchId;
+
+        $query = $this->db->query($sql); 
+        $result = $query->result_array();
+
+        foreach ($result as $key => $value) 
+        {
+            $contestId = $value['contestId'];
+
+            //get total winners
+            $totalWinnerCount = $this->CommonModel->selectRecord(array('contestid' => $contestId), 'prize', 'MAX(max1) AS totalWinnerCount');
+            $result[$key]['totalWinnerCount'] = $totalWinnerCount['totalWinnerCount'];
+
+            //get left team count(no_of_teams-joined_teams)
+            $totalUserJoinedCount = $this->CommonModel->selectRecord(
+                array(
+                    'contests_id' => $contestId, 
+                    'match_id' =>  $matchId
+                ), 
+                'matches_joined', 
+                'COUNT(joined_id) AS totalUserJoinedCount'
+            );
+            $result[$key]['totalUserJoinedCount'] = $totalUserJoinedCount['totalUserJoinedCount'];
+
+            //required in upcoming match
+            if (in_array(1, $matchType))
+            {
+                //get left team count(no_of_teams-joined_teams)
+                $leftTeamCount = $this->CommonModel->selectRecord(array('contests_id' => $contestId), 'matches_joined', 'COUNT(joined_id) AS leftTeamCount');
+                $result[$key]['leftTeamCount'] = (string) ($value['totalTeamCount'] - $leftTeamCount['leftTeamCount']);
+            }
+
+            if (in_array(2, $matchType) || in_array(4, $matchType))
+            {
+                //get logged in user count of contest
+                $userJoinedCount = $this->CommonModel->selectRecord(array('contests_id' => $contestId, 'user_id' => $userId), 'matches_joined', 'COUNT(joined_id) AS userJoinedCount');
+                $result[$key]['loggedInUserJoinedCount'] = $userJoinedCount['userJoinedCount'];
+            }
+
+            //get user rank for contest
+            if (in_array(2, $matchType) || in_array(3, $matchType))
+            {
+                //get logged in user count of contest
+                $rankResult = $this->CommonModel->selectRecords(array('match_id' => $matchId, 'user_id' => $userId), 'user_team', 'rank AS userRank, teamNumber', array('rank' => 'ASC'), '', '', array(0, 1));
+                $result[$key] = $rankResult[0];
+            }   
+        }
+
+        return $result;
+    }
+
+    public function getUserJoinedMatch($request)
+    {
+        $userId = isset($request['userId']) ? $request['userId'] : "";
+        $matchType = isset($request['matchType']) ? $request['matchType'] : "";
+
+        $sql[] = 'SELECT 
+                    COUNT(DISTINCT(contests_id)) AS joinedCount, match_id AS matchId, mat_status AS matchStatus
+                FROM matches_joined
+                INNER JOIN API_matches ON mat_id = match_id
+                WHERE user_id = '.$userId;
+
+        if ($request['matchType']) 
+            $sql[] = "mat_status IN (".$request['matchType'].")";
+
+        $sql = implode(' AND ', $sql)." GROUP BY match_id ORDER BY mat_startdate ASC";
+
+        $query = $this->db->query($sql); 
+        $result = $query->result_array();
+
+        return $result;
+    }
+
+    public function getContestPrizePool($request)
+    {
+        $sql = 'SELECT
+                    (CASE WHEN min1 != max1 
+                            THEN CONCAT(min1, " - ", max1)
+                            ELSE max1
+                    END) AS rank, prize
+                FROM prize
+                WHERE contestid = '.$request['contestId'].'
+                ORDER BY prize DESC';
+
+        $query = $this->db->query($sql); 
+        $result = $query->result_array();
+
+        return $result;
+    }
+
+    public function getCount($param)
+    {
+        //get number of teams from contest
+        $sql = 'SELECT no_of_teams, repeat1 FROM contests WHERE contests_id = '.$param['contestId'];
+        $query = $this->db->query($sql); 
+        $no_of_teams = $query->row_array();
+
+        //get total joined count
+        $sql = 'SELECT COUNT(joined_id) AS joinedCount FROM matches_joined WHERE contests_id = '.$param['contestId'];
+        $query = $this->db->query($sql); 
+        $joinedCount = $query->row_array();
+
+        if ($no_of_teams['no_of_teams'] < $joinedCount['joinedCount']) 
+            return array(false, 'contest already full!');
+
+        //get total joined team count
+        $sql = 'SELECT COUNT(joined_id) AS joinedTeamCount FROM matches_joined WHERE user_id = '.$param['userId'].' AND match_id = '.$param['matchId'].' AND team_id = '.$param['teamId'].' AND contests_id = '.$param['contestId'];
+        $query = $this->db->query($sql); 
+        $joinedTeamCount = $query->row_array();
+        if ($joinedTeamCount['joinedTeamCount'] > 0)
+            return array(false, 'you already joined this contest with selected team!');
+
+        return array(true);
+    }
+
+    public function joinContest($request)
+    {
+        // Write the contents back to the file
+        //file_put_contents('test.txt', 'BUSY');
+
+        $userId = $request['userId'];
+        $matchId = $request['matchId'];
+        $contestId = $request['contestId'];
+        $teamId = $request['teamId'];
+
+        $sql = 'SELECT
+                fee, repeat1, no_of_teams AS totalTeamCount, bamount, damount, wamount, contests.type AS contestType,
+                COUNT(matches_joined.contests_id) AS totalJoinedCount,
+                IF((SELECT COUNT(*) FROM matches_joined WHERE contests_id = '.$contestId.' AND match_id = '.$matchId.' AND team_id = '.$teamId.' AND user_id = '.$userId.') = 0, 0, 1) AS isAlreadyJoinedWithOneTeam,
+                (CASE 
+                    WHEN multi = 1
+                        THEN
+                            IF((SELECT COUNT(*) FROM matches_joined WHERE contests_id = '.$contestId.' AND match_id = '.$matchId.' AND user_id = '.$userId.') = 0, 1, 0)
+                        ELSE 1
+                END ) AS isAllowedMultiJoin
+                FROM API_matches 
+                INNER JOIN contests ON repeat1 > 0 AND contests_id = '.$contestId.'
+                LEFT JOIN matches_joined ON matches_joined.contests_id = contests.contests_id
+                LEFT JOIN wallet1 ON wallet1.userid = '.$userId.'
+                WHERE mat_id = '.$matchId.' AND mat_status = 1 AND mat_startdate > NOW()
+                GROUP BY contests.contests_id, wallet1.userid';
+
+        $query = $this->db->query($sql); 
+        $result = $query->row_array();
+
+        //echo "<pre>"; print_r($result); die;
+        if ($result && $result['isAllowedMultiJoin'] && !$result['isAlreadyJoinedWithOneTeam']) 
+        {
+            //check available balance is sufficient or not
+            $contestFee = $result['fee'];
+            $bamount = $result['bamount'];
+            $damount = $result['damount'];
+            $wamount = $result['wamount'];
+
+            if ($result['contestType'] == 1) 
+            {
+                $isValidAmount = $bamount-(($contestFee*5)/100);
+                if ($isValidAmount < 0)
+                    $checkAmount = $damount+$wamount+$isValidAmount;
+                else
+                    $checkAmount = $damount+$wamount;
+
+                if ($checkAmount < ($contestFee-(($contestFee*5)/100))) 
+                    return array(false, 'insufficient fund!');
+            }
+            else if (($damount+$wamount) < $contestFee) 
+                return array(false, 'insufficient fund!');
+
+            $no_of_join = $this->CommonModel->selectRecord(array('contests_id' => $contestId), 'matches_joined', 'MAX(no_of_join) AS no_of_join');
+            if ($no_of_join['no_of_join'] >= $result['totalTeamCount']) 
+            {
+                // Write the contents back to the file
+                //file_put_contents('test.txt', 'FREE');
+
+                return array(false, 'contest full!');
+            }
+
+            //insert into joined matches
+            $user_joined_data = array();
+            $user_joined_data['user_id'] = $userId;
+            $user_joined_data['match_id'] = $matchId;
+            $user_joined_data['team_id'] = $teamId;
+            $user_joined_data['contests_id'] = $contestId;
+            $user_joined_data['no_of_join'] = $no_of_join['no_of_join']+1;
+            $inserted_id = $this->CommonModel->insertData('matches_joined', $user_joined_data);
+
+            if ($inserted_id) 
+            {
+                $totalJoinedCount = $result['totalJoinedCount']+1;
+
+                //update and insert new contest
+                if ($totalJoinedCount%$result['totalTeamCount'] == 0) 
+                {
+                    //update contest repeat and isfull value
+                    $this->CommonModel->updateData('contests', array('isFull' => 1), array('contests_id' => $contestId));
+
+                    //insert new contest if repeat value is not 0
+                    $repeatVal = $result['repeat1']-1;
+                    if ($repeatVal > 0) 
+                    {
+                        //copy contest
+                        $sql = "INSERT INTO contests (amount, no_of_teams, fee, matchid, repeat1, fill1, multi, type)
+                                SELECT amount, no_of_teams, fee, matchid, ".$repeatVal.", fill1, multi, type
+                                FROM contests
+                                WHERE contests_id = ".$contestId;
+
+                        $this->db->query($sql);
+                        $newContestId = $this->db->insert_id();
+        
+                        //copy contest prizes
+                        $sql = 'INSERT INTO prize(contestid, min1, max1, prize)
+                        SELECT '.$newContestId.', min1, max1, prize
+                        FROM prize
+                        WHERE contestid = '.$contestId;
+                        
+                        $this->db->query($sql);
+                    }
+                }
+
+                if ($result['contestType'] == 1) 
+                {
+                    $fixedBamount = ($contestFee*5)/100;
+                    $remainAmount = 0;
+
+                    if ($fixedBamount <= $bamount)
+                    {
+                        $remainAmount = $contestFee-$fixedBamount;
+                        $bamount = $bamount-$fixedBamount;
+                    }
+                    else
+                    {
+                        $remainAmount = $contestFee-$bamount;
+                        $bamount = 0;
+                    }
+
+                    if ($damount >= $remainAmount) 
+                        $damount = $damount-$remainAmount;
+                    else
+                    {
+                        $remainAmount = $remainAmount-$damount;
+                        $damount = 0;
+                        $wamount = $wamount-$remainAmount;
+                    }
+
+                    //update wallet balance
+                    $wallet_data = array();
+                    $wallet_data['bamount'] = round($bamount, 2);
+                    $wallet_data['damount'] = round($damount, 2);
+                    $wallet_data['wamount'] = round($wamount, 2);
+                }
+                else
+                {
+                    if ($damount >= $contestFee) 
+                        $damount = $damount-$contestFee;
+                    else
+                    {
+                        $remainAmount = $contestFee-$damount;
+                        $damount = 0;
+                        $wamount = $wamount-$remainAmount;
+                    }
+
+                    //update wallet balance
+                    $wallet_data = array();
+                    $wallet_data['damount'] = round($damount, 2);
+                    $wallet_data['wamount'] = round($wamount, 2);
+                }
+
+                //update wallet balance
+                $this->db->trans_begin();
+
+                $this->db->query('INSERT INTO transaction(userid, amount, type, contestid) VALUES('.$userId.', '.$contestFee.', "fee", '.$contestId.')');
+
+                $this->CommonModel->updateData('wallet1', $wallet_data, array('userid' => $userId));
+
+                if ($this->db->trans_status() === FALSE)
+                {
+                    // Write the contents back to the file
+                    //file_put_contents('test.txt', 'FREE');
+
+                    return array(false, 'request can not be complete!');
+                    $this->db->trans_rollback();
+                }
+                else
+                    $this->db->trans_commit();
+
+                // Write the contents back to the file
+                //file_put_contents('test.txt', 'FREE');
+
+                //return array('joinedId' => $inserted_id);
+                return array(true);
+            }
+            else
+            {
+                // Write the contents back to the file
+                //file_put_contents('test.txt', 'FREE');
+
+                return array(false, 'unable to join the contest!');
+            }
+        }
+
+        // Write the contents back to the file
+        //file_put_contents('test.txt', 'FREE');
+
+        if (!$result) 
+            return array(false, 'something wrong with the match!');
+        else if (!$result['isAllowedMultiJoin']) 
+            return array(false, 'you can not join this contest with same team!');
+        else if ($result['isAlreadyJoinedWithOneTeam'])
+            return array(false, 'You already joined this contest with same team');
+        else if ($result['totalJoinedCount'] < $result['totalTeamCount'])
+            return array(false, 'contest is already full');
+        else
+            return array(false, 'something went wrong');
+    }
+    
+    public function getLeaderboard($request)
+    {
+        $matchId = $request['matchId'];
+        $contestId = $request['contestId'];
+
+        $sql = 'SELECT 
+                    joined_id AS joinedId, username, email AS userId, user_team_number AS teamNumber, team_id AS teamId, usr_team_name AS userTeamName, usr_team_earn_points AS points, amount AS winningAmount, rank,
+                    IF(image, CONCAT("'.base_url().USER_PROFILE_IMAGE_PATH.'", image), "") AS photo
+                FROM user
+                INNER JOIN matches_joined 
+                    ON email = user_id AND match_id = '.$matchId.' AND contests_id = '.$contestId.'
+                INNER JOIN user_team
+                    ON user_team_id = team_id 
+                 ORDER BY usr_team_earn_points DESC, username ASC, user_team_number ASC';
+
+        $query = $this->db->query($sql); 
+        $result = $query->result_array();
+
+        //$resp = $this->calculatePriceAndRank($result, $contestId);
+
+        return $result;
+    }
+
+    public function calculatePriceAndRank($records, $contestId)
+    {
+        $rank = 0;
+        $last_score = false;
+        $rows = 1;
+        $count = 1;
+
+        foreach ($records as $key => $value) 
+        {
+            if($last_score != $value['points'])
+            {
+                if ($last_score)
+                    $rows = $key+1;
+
+                $last_score = $value['points'];
+                $rank = $rows;
+            }
+
+            if ($value['points'] > 0)
+                $records[$key]['rank'] = $rank;
+            else
+                $records[$key]['rank'] = "";
+        }
+
+        //devide prize money if rank are same
+        $getRankArr = array_count_values(array_column($records, 'rank'));
+
+        if (!array_key_exists("", $getRankArr)) 
+        {  
+            foreach ($getRankArr as $key => $value)
+            {
+                $sum = 0;
+                $rank = $key;
+
+                for ($i = 1; $i <= $value; $i++) 
+                { 
+                    $prize = $this->getContestRankPrizeDetail($contestId, $rank);
+                    $rank++;
+                    if ($prize)
+                        $sum += $prize['prize'];
+                }
+
+                foreach ($records as $recKey => $recValue) 
+                {
+                    if ($recValue['rank'] == $key) 
+                    {
+                        $winningAmount = $sum/$value; 
+                            
+                        $records[$recKey]['winningAmount'] = round($winningAmount, 2);
+                    }
+                }
+            }
+        }
+
+        return $records;
+    }
+ 
+    private function getContestRankPrizeDetail($contestId, $rank)
+    {
+        //get current rank values
+        $sql = 'SELECT prize, min1, max1 FROM prize WHERE '.$rank.' BETWEEN min1 AND max1 AND contestid = '.$contestId;
+        $query = $this->db->query($sql); 
+        $min_max_prize = $query->row_array();
+        
+        return $min_max_prize;
+    }
+
+    public function savePaytmDetail($paytm_data)
+    {
+        $sql = $this->db->insert_string('API_user_account', $paytm_data). 
+                ' ON DUPLICATE KEY UPDATE 
+                    usr_paytm_number = VALUES(usr_paytm_number),
+                    usr_paytm_isVarified = VALUES(usr_paytm_isVarified)';
+
+        $this->db->query($sql);
+
+        $id = $this->db->insert_id();
+
+
+
+        return $id;
+
+    }
+
+    public function saveAccountDetail($act_data)
+    {
+        $sql = $this->db->insert_string('API_user_account', $act_data). 
+                ' ON DUPLICATE KEY UPDATE 
+                    usr_bank_acHolderName = VALUES(usr_bank_acHolderName),
+                    usr_bank_acNumber = VALUES(usr_bank_acNumber),
+                    usr_bank_name = VALUES(usr_bank_name),
+                    usr_bank_ifsc = VALUES(usr_bank_ifsc),
+                    usr_bank_acType = VALUES(usr_bank_acType),
+                    usr_bank_proofImage = VALUES(usr_bank_proofImage),
+                    usr_bank_isVarified = VALUES(usr_bank_isVarified),
+                    usr_pan_number = VALUES(usr_pan_number),
+                    usr_pan_image = VALUES(usr_pan_image),
+                    usr_pan_name = VALUES(usr_pan_name),
+                    usr_paytm_number = VALUES(usr_paytm_number),
+                    usr_paytm_isVarified = VALUES(usr_paytm_isVarified)';
+
+        $this->db->query($sql);
+        $id = $this->db->insert_id();
+
+        return $id;
+    }
+
+    public function saveBankDetail($bank_data)
+    {
+        $sql = $this->db->insert_string('API_user_account', $bank_data). 
+                ' ON DUPLICATE KEY UPDATE 
+                    usr_bank_acHolderName = VALUES(usr_bank_acHolderName),
+                    usr_bank_acNumber = VALUES(usr_bank_acNumber),
+                    usr_bank_name = VALUES(usr_bank_name),
+                    usr_bank_ifsc = VALUES(usr_bank_ifsc),
+                    usr_bank_acType = VALUES(usr_bank_acType),
+                    usr_bank_proofImage = VALUES(usr_bank_proofImage),
+                    usr_bank_isVarified = VALUES(usr_bank_isVarified)';
+
+        $this->db->query($sql);
+        $id = $this->db->insert_id();
+
+        return $id;
+    }
+
+    public function savePANDetail($pan_data)
+    {
+        $sql = $this->db->insert_string('API_user_account', $pan_data). 
+                ' ON DUPLICATE KEY UPDATE 
+                    usr_pan_number = VALUES(usr_pan_number),
+                    usr_pan_image = VALUES(usr_pan_image),
+                    usr_pan_name = VALUES(usr_pan_name)';
+
+        $this->db->query($sql);
+        $id = $this->db->insert_id();
+
+        return $id;
+    }
+
+    public function savePaytmDetail1($paytm_data)
+    {
+        $sql = $this->db->insert_string('API_user_account', $paytm_data). 
+                ' ON DUPLICATE KEY UPDATE 
+                    usr_paytm_number = VALUES(usr_paytm_number),
+                    usr_paytm_isVarified = VALUES(usr_paytm_isVarified)';
+
+        $this->db->query($sql);
+        $id = $this->db->insert_id();
+
+        return $id;
+    }
+
+    public function forgotPassword($email, $mobile)
+    {
+        if ($email && $mobile) 
+            $where = 'email1 = "'.$email.'" OR mobile = "'.$mobile.'"';
+        else if ($email && !$mobile) 
+            $where = 'email1 = "'.$email.'"';
+        else if (!$email && $mobile) 
+            $where = 'mobile = "'.$mobile.'"';
+
+        $sql = 'SELECT username, mobile, email1 AS email, password, mobile
+                FROM user
+                WHERE '.$where;        
+
+        $query = $this->db->query($sql); 
+        $result = $query->row_array();
+
+        return $result;   
+    }
+
+    public function withdrawalMoney($request)
+    {
+        $status = FALSE;
+
+        if ($request['withdrawalType'] == 'PAYTM')
+            $col = 'usr_paytm_isVarified = 2';
+        else if ($request['withdrawalType'] == 'ACCOUNT')
+            $col = 'usr_bank_isVarified = 2';
+
+
+
+        $sql = 'SELECT email, wamount
+
+                FROM user
+
+                INNER JOIN wallet1 
+
+                    ON userid = email AND wamount >= '.$request['amount'].'
+
+                INNER JOIN API_user_account
+
+                    ON usr_id = email AND '.$col.'
+
+                WHERE email = '.$request['usr_id'];
+
+
+
+        //echo $sql; die;
+
+        $query = $this->db->query($sql); 
+
+        $result = $query->row_array();
+
+        //print_r($result); die;
+
+
+
+        if ($result) 
+
+        {
+
+            $this->db->trans_begin();
+
+
+
+            $this->db->query('INSERT INTO transaction(userid, amount, type, withdraw_type) VALUES('.$request['usr_id'].', '.$request['amount'].', "withdraw", "'.$request['withdrawalType'].'")');
+
+
+
+            $totalAmount = $result['wamount']-$request['amount'];
+
+            $this->db->query('UPDATE wallet1 SET wamount = '.$totalAmount.' WHERE userid = '.$request['usr_id']);
+
+
+
+            if ($this->db->trans_status() === FALSE)
+
+                $this->db->trans_rollback();
+
+            else
+
+            {
+
+                $status = TRUE;
+
+                $this->db->trans_commit();
+
+            }
+        }
+
+        return $status; 
+    }
+
+    public function depositMoney($request)
+    {
+        $this->db->trans_begin();
+
+        $this->db->query('INSERT INTO transaction(userid, amount, type) VALUES('.$request['usr_id'].', '.$request['amount'].', "deposit")');
+
+        $totalAmount = $request['amount']+$request['damount'];
+
+        $this->db->query('UPDATE wallet1 SET damount = '.$totalAmount.' WHERE userid = '.$request['usr_id']);
+
+        if ($this->db->trans_status() === FALSE)
+        {
+            $status = FALSE;
+            $this->db->trans_rollback();
+        }
+        else
+        {
+            $status = TRUE;
+            $this->db->trans_commit();
+        }
+
+        return $status;
+    }
+
+    public function getUserDetail($userId)
+    {
+        $sql = 'SELECT 
+                    username, username AS name, email1 AS email, email AS userId, mobile, token, refid AS referCode,
+                    CONCAT("'.base_url().USER_PROFILE_IMAGE_PATH.'", image) AS photo,
+                    (CASE 
+                        WHEN usr_bank_isVarified IS NULL
+                        THEN 0
+                        ELSE usr_bank_isVarified
+                    END) AS isVarifiedBank, 
+                    (CASE 
+                        WHEN usr_paytm_isVarified IS NULL
+                        THEN 0
+                        ELSE usr_paytm_isVarified
+                    END) AS isVarifiedPaytm
+                FROM user
+                LEFT JOIN API_user_account 
+                    ON usr_id = email
+                LEFT JOIN refer1 
+                    ON userid = email
+                WHERE email = '.$userId;
+
+        //echo $sql; die;
+        $query = $this->db->query($sql); 
+        $result = $query->row_array();
+
+        return $result; 
+    }
+
+    public function getPlayerStats($request)
+    {
+        $matchId = $request['matchId'];
+        $Playing11_ids = $request['Playing11_ids'];
+
+        $sql = "SELECT 
+                    pnt_id AS pointId, pnt_ply_id AS playerId, pnt_total AS points, pnt_rating AS rating, pnt_starting11 AS `stating 11`, pnt_run AS runs, pnt_four AS `4's`, pnt_six AS `6's`, pnt_sr AS `s/r`, pnt_fifty AS `50`, pnt_duck AS duck, pnt_wkts AS wkts, pnt_maidenover AS `maiden over`, pnt_er AS `e/r`, pnt_catch as catch, pnt_runoutstumping AS `run out/strumping`, pnt_runoutthrower AS `r/o throw over`, pnt_runoutcatcher AS `r/o catcher`, pnt_directrunout AS `r/o direct`, pnt_stumping AS stumping, pnt_thirty AS `30`, ply_first_name AS firstName, ply_middle_name AS middleName, ply_last_name AS lastName, ply_title AS title, ply_shortName AS shortName, ply_logo_url AS logo, ply_role AS role
+                FROM API_player_point
+                INNER JOIN API_players ON ply_id = pnt_ply_id
+                WHERE pnt_mat_id = ".$matchId." AND pnt_ply_id IN (".$Playing11_ids.")";
+
+        //echo $sql; die;
+        $query = $this->db->query($sql); 
+        $result = $query->result_array();
+
+        return $result; 
+    }
+
+    public function getPlayerDetail($teamPlayers, $matchId, $teamId='')
+    {
+        if ($teamPlayers) 
+        {
+            $sql = 'SELECT 
+                        ply_id AS playersId, ply_first_name AS firstName, ply_middle_name AS middleName, ply_last_name AS lastName, ply_title AS title, ply_shortName AS shortName, ply_country AS country, ply_logo_url AS photo, ply_role AS role, ply_fantasy_points, ply_logo_url AS photo, 
+                        (CASE WHEN pnt_total IS NULL THEN 0 ELSE pnt_total END) AS points,
+                        (CASE WHEN mat_sqd_id != "" THEN 1 ELSE 0 END) AS playing11
+                    FROM API_players
+                    LEFT JOIN API_player_point
+                        ON pnt_mat_id = '.$matchId.' AND pnt_ply_id = ply_id
+                    LEFT JOIN API_match_squad
+                        ON FIND_IN_SET(ply_id, `sqd_ply11_ids`) AND sqd_mat_id = '.$matchId.' 
+                    WHERE ply_id IN ('.implode(',', $teamPlayers).') ';
+
+            //echo $sql; die;
+            $query = $this->db->query($sql); 
+            $result = $query->result_array();
+
+            return $result; 
+        }
+        else
+            return FALSE;
+    }
+
+    public function getTransactionHistory($userId)
+    {
+        $sql = 'SELECT ROUND(amount, 2) AS amount, type, contestid, transaction.date1 AS transactionDate,
+                    IF(type = "deposit" OR type = "cancelled" OR type = "abandoned" OR type = "signup" OR type = "winning" OR type = "winning" OR type = "winnings", 1, 0) AS isPositive,
+                    (CASE 
+                        WHEN withdraw_type IS NULL
+                            THEN ""
+                        ELSE withdraw_type
+                    END) AS withdrawalType 
+                FROM transaction
+                INNER JOIN user ON email = userid
+                WHERE transaction.date1 > "2019-09-15" AND userid = '.$userId.' 
+                ORDER BY transaction.date1 DESC';
+
+        $query = $this->db->query($sql); 
+        $result = $query->result_array();
+
+        return $result;
+    }
+
+    public function getBankDetail($userId)
+    {
+        $sql = 'SELECT
+                    (CASE 
+                        WHEN usr_bank_acHolderName IS NULL
+                            THEN ""
+                        ELSE usr_bank_acHolderName
+                    END) AS acHolderName, 
+                    (CASE 
+                        WHEN usr_bank_acNumber IS NULL
+                            THEN ""
+                        ELSE usr_bank_acNumber
+                    END) AS acNumber,
+                    (CASE 
+                        WHEN usr_bank_name IS NULL
+                            THEN ""
+                        ELSE usr_bank_name
+                    END) AS bankName,
+                    (CASE 
+                        WHEN usr_bank_ifsc IS NULL
+                            THEN ""
+                        ELSE usr_bank_ifsc
+                    END) AS bankIFSC,
+                    (CASE 
+                        WHEN usr_bank_acType IS NULL
+                            THEN ""
+                        ELSE usr_bank_acType
+                    END) AS acType,
+                    (CASE 
+                        WHEN usr_bank_proofImage IS NULL
+                            THEN ""
+                        ELSE CONCAT("'.base_url().USER_PROOF_PATH.'", usr_bank_proofImage)
+                    END) AS proofImage, 
+                    usr_bank_isVarified AS isVarified
+                FROM API_user_account
+                WHERE usr_bank_isVarified != 3 AND usr_id = '.$userId;
+
+        $query = $this->db->query($sql);
+        $result = $query->row_array();
+
+        return $result;
+    }
+
+    public function getPANDetail($userId)
+    {
+        $sql = 'SELECT
+                    (CASE 
+                        WHEN usr_pan_number IS NULL
+                            THEN ""
+                        ELSE usr_pan_number
+                    END) AS panNumber, 
+                    (CASE 
+                        WHEN usr_pan_name IS NULL
+                            THEN ""
+                        ELSE usr_pan_name
+                    END) AS panName, 
+                    (CASE 
+                        WHEN usr_pan_image IS NULL
+                            THEN ""
+                        ELSE CONCAT("'.base_url().USER_PROOF_PATH.'", usr_pan_image)
+                    END) AS panImage
+                FROM API_user_account
+                WHERE usr_id = '.$userId;
+
+        $query = $this->db->query($sql); 
+        $result = $query->row_array();
+
+        return $result;
+    }
+
+    public function getPaytmDetail($userId)
+    {
+        $sql = 'SELECT
+                    (CASE 
+                        WHEN usr_paytm_number IS NULL
+                            THEN ""
+                        ELSE usr_paytm_number
+                    END) AS paytmNumber, 
+                    usr_paytm_isVarified AS isVarified
+                FROM API_user_account
+                WHERE usr_paytm_isVarified != 3 AND usr_id = '.$userId;
+
+        $query = $this->db->query($sql); 
+        $result = $query->row_array();
+
+        return $result;
+    }
+
+    public function getAccountDetail($userId)
+    {
+        $sql = 'SELECT
+                    (CASE 
+                        WHEN usr_pan_number IS NULL
+                            THEN ""
+                        ELSE usr_pan_number
+                    END) AS panNumber, 
+                    (CASE 
+                        WHEN usr_pan_name IS NULL
+                            THEN ""
+                        ELSE usr_pan_name
+                    END) AS panName, 
+                    (CASE 
+                        WHEN usr_pan_image IS NULL
+                            THEN ""
+                        ELSE CONCAT("'.base_url().USER_PROOF_PATH.'", usr_pan_image)
+                    END) AS panImage,
+                    (CASE 
+                        WHEN usr_bank_acHolderName IS NULL
+                            THEN ""
+                        ELSE usr_bank_acHolderName
+                    END) AS acHolderName, 
+                    (CASE 
+                        WHEN usr_bank_acNumber IS NULL
+                            THEN ""
+                        ELSE usr_bank_acNumber
+                    END) AS acNumber,
+                    (CASE 
+                        WHEN usr_bank_name IS NULL
+                            THEN ""
+                        ELSE usr_bank_name
+                    END) AS bankName,
+                    (CASE 
+                        WHEN usr_bank_ifsc IS NULL
+                            THEN ""
+                        ELSE usr_bank_ifsc
+                    END) AS bankIFSC,
+                    (CASE 
+                        WHEN usr_bank_acType IS NULL
+                            THEN ""
+                        ELSE usr_bank_acType
+                    END) AS acType,
+                    (CASE 
+                        WHEN usr_bank_proofImage IS NULL
+                            THEN ""
+                        ELSE CONCAT("'.base_url().USER_PROOF_PATH.'", usr_bank_proofImage)
+                    END) AS proofImage, 
+                    usr_bank_isVarified AS isBankVarified,
+                    (CASE 
+                        WHEN usr_paytm_number IS NULL
+                            THEN ""
+                        ELSE usr_paytm_number
+                    END) AS paytmNumber, 
+                    usr_paytm_isVarified AS isPaytmVarified,
+                    usr_act_remark AS remark
+                FROM API_user_account
+                WHERE usr_id = '.$userId;
+
+        $query = $this->db->query($sql); 
+        $result = $query->row_array();
+
+        return $result;
+    }
+}

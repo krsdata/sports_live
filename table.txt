@@ -1,0 +1,11 @@
+CREATE TABLE `timeseries` (
+  `id` int(11) NOT NULL,
+  `BoomHydFlowReq` varchar(255) NOT NULL DEFAULT '0',
+  `BucketHydFlowReq` varchar(255) NOT NULL DEFAULT '0',
+  `FanDriveStatus` varchar(255) NOT NULL DEFAULT '0',
+  `GovernerReq` varchar(255) NOT NULL DEFAULT '0',
+  `LoadSnsHydP` varchar(255) NOT NULL DEFAULT '0',
+  `Main_FNRFwd` varchar(255) NOT NULL DEFAULT '0',
+  `Main_FNRRev` varchar(255) NOT NULL DEFAULT '0',
+  `value` float(10,2) NOT NULL DEFAULT 0.00
+) ENGINE=InnoDB DEFAULT CHARSET=latin1;
